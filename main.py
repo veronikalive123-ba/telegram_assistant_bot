@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import sqlite3
+import sys
+import logging
+import os
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Optional
-import re
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -16,20 +18,30 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# ======================== КОНФИГУРАЦИЯ ========================
-BOT_TOKEN = "8604443712:AAGPC5TWB7QU_cJD-tKVAgw5zjnRMoAasQ8"   # ← ВСТАВЬТЕ СЮДА ТОКЕН, лучше через secrets
+# === НАСТРОЙКА ЛОГИРОВАНИЯ ДЛЯ RENDER ===
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
+BOT_TOKEN = os.environ.get("8604443712:AAGPC5TWB7QU_cJD-tKVAgw5zjnRMoAasQ8")
+if not BOT_TOKEN:
+    logger.error("BOT_TOKEN not found in environment variables")
+    sys.exit(1)
+
 DB_NAME = "assistant.db"
+ADMIN_ID = None   # можно указать числовой ID, если нужно
 
-
-# ======================== БАЗА ДАННЫХ ========================
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
         username TEXT,
-        premium_until DATE,          -- NULL – бесплатный, иначе дата окончания
-        timezone INTEGER DEFAULT 3,  -- UTC+3 по умолчанию
+        premium_until DATE,
+        timezone INTEGER DEFAULT 3,
         report_hour INTEGER DEFAULT 22
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS tasks (
@@ -37,7 +49,7 @@ def init_db():
         user_id INTEGER,
         title TEXT,
         is_done BOOLEAN DEFAULT 0,
-        priority TEXT DEFAULT 'medium',  -- low, medium, high
+        priority TEXT DEFAULT 'medium',
         due_date TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
@@ -46,19 +58,20 @@ def init_db():
         user_id INTEGER,
         text TEXT,
         remind_at TIMESTAMP,
-        repeats_left INTEGER DEFAULT 1,  -- сколько ещё раз напомнить (0 = неактивно)
-        repeat_interval INTEGER,         -- интервал в минутах (опционально, не используем для простоты)
+        repeats_left INTEGER DEFAULT 1,
+        repeat_interval INTEGER,
         is_active BOOLEAN DEFAULT 1
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS habits (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         name TEXT,
-        last_tracked DATE,      -- последняя отметка (YYYY-MM-DD)
+        last_tracked DATE,
         streak INTEGER DEFAULT 0
     )''')
     conn.commit()
     conn.close()
+    logger.info("Database initialized")
 
 def is_premium(user_id: int) -> bool:
     conn = sqlite3.connect(DB_NAME)
@@ -169,7 +182,6 @@ def track_habit(user_id: int, habit_name: str) -> str:
     if last == today_str:
         conn.close()
         return "✅ Сегодня вы уже отмечали эту привычку!"
-    # Обновляем streak
     if last == (date.today() - timedelta(days=1)).isoformat():
         streak += 1
     else:
@@ -203,8 +215,7 @@ def ensure_user(user_id: int, username: str = None):
     conn.commit()
     conn.close()
 
-# ======================== КОМАНДЫ И СОСТОЯНИЯ ========================
-# Состояния для ConversationHandler (добавление задач списком)
+# === ОБРАБОТЧИКИ КОМАНД ===
 ADD_TASK_WAITING = 1
 ADD_REMINDER_TEXT, ADD_REMINDER_DATETIME, ADD_REMINDER_REPEATS = range(10, 13)
 ADD_HABIT_NAME = 20
@@ -213,24 +224,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.username)
     text = (
-        "🤖 *Личный помощник* — твой трекер задач, привычек и эффективности.\n\n"
+        "🤖 *Личный помощник* — трекер задач, привычек и эффективности.\n\n"
         "🔹 *Бесплатно:* до 5 задач, до 2 напоминаний, до 2 привычек, ежедневный отчёт.\n"
-        "🔹 *Premium (99 руб/мес):* безлимит, приоритеты, расширенная статистика (проценты, графики), таймер Pomodoro.\n\n"
+        "🔹 *Premium (99 руб/мес):* безлимит, приоритеты, расширенная статистика, Pomodoro.\n\n"
         "📌 *Команды:*\n"
-        "/add_task – добавить задачи (можно сразу несколько, каждую с новой строки)\n"
+        "/add_task – добавить задачи (несколько, каждая с новой строки)\n"
         "/tasks – список задач с кнопками «Сделано»\n"
         "/add_reminder – установить напоминание\n"
         "/reminders – мои напоминания\n"
         "/add_habit – добавить привычку\n"
         "/habits – список привычек\n"
         "/track_habit <название> – отметить выполнение привычки\n"
-        "/daily – отчёт за сегодня (короткий для всех, полный – для Premium)\n"
-        "/premium – купить подписку (тестовая активация)\n\n"
-        "💡 *Пример:* /add_task → отправляете три строки → задачи добавятся."
+        "/daily – отчёт за сегодня\n"
+        "/premium – купить подписку (тестовая активация)"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
-# -------------------- ЗАДАЧИ --------------------
 async def add_task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📝 Пришлите список задач, каждую с новой строки.\nПример:\nКупить молоко\nПозвонить маме\nЗакончить отчёт")
     return ADD_TASK_WAITING
@@ -240,7 +249,7 @@ async def add_task_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = update.message.text.strip().split("\n")
     tasks = [line.strip() for line in lines if line.strip()]
     if not tasks:
-        await update.message.reply_text("❌ Пустой список. Попробуйте снова /add_task")
+        await update.message.reply_text("❌ Пустой список.")
         return ConversationHandler.END
 
     premium = is_premium(user_id)
@@ -249,7 +258,7 @@ async def add_task_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if current_tasks + len(tasks) > max_tasks:
         limit_msg = "безлимит" if premium else f"{max_tasks}"
-        await update.message.reply_text(f"❌ Лимит активных задач ({limit_msg}). Выполните старые через /tasks или купите Premium (/premium).\nСейчас у вас {current_tasks} задач, попытка добавить {len(tasks)}.")
+        await update.message.reply_text(f"❌ Лимит активных задач ({limit_msg}). Выполните старые через /tasks или купите Premium (/premium).")
         return ConversationHandler.END
 
     for title in tasks:
@@ -262,7 +271,7 @@ async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     tasks = get_user_tasks(user_id, only_active=True)
     if not tasks:
-        await update.message.reply_text("🎉 У вас нет активных задач! Отдыхайте или добавьте через /add_task")
+        await update.message.reply_text("🎉 У вас нет активных задач!")
         return
     text = "📋 *Ваши задачи*\n\n"
     keyboard = []
@@ -281,26 +290,25 @@ async def task_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         task_id = int(data.split("_")[1])
         user_id = query.from_user.id
         complete_task(task_id, user_id)
-        await query.edit_message_text("✅ Задача отмечена выполненной. /tasks — чтобы обновить список.")
+        await query.edit_message_text("✅ Задача выполнена.")
 
-# -------------------- НАПОМИНАНИЯ --------------------
 async def add_reminder_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏰ Напишите текст напоминания.")
     return ADD_REMINDER_TEXT
 
 async def reminder_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["reminder_text"] = update.message.text
-    await update.message.reply_text("📅 Укажите дату и время в формате: ГГГГ-ММ-ДД ЧЧ:ММ\nПример: 2026-05-01 15:30")
+    await update.message.reply_text("📅 Укажите дату и время: ГГГГ-ММ-ДД ЧЧ:ММ\nПример: 2026-05-01 15:30")
     return ADD_REMINDER_DATETIME
 
 async def reminder_datetime(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         remind_at = datetime.strptime(update.message.text, "%Y-%m-%d %H:%M")
     except:
-        await update.message.reply_text("❌ Неверный формат. Используйте ГГГГ-ММ-ДД ЧЧ:ММ")
+        await update.message.reply_text("❌ Неверный формат.")
         return ADD_REMINDER_DATETIME
     if remind_at <= datetime.now():
-        await update.message.reply_text("❌ Дата и время должны быть в будущем.")
+        await update.message.reply_text("❌ Дата должна быть в будущем.")
         return ADD_REMINDER_DATETIME
     context.user_data["remind_at"] = remind_at
     await update.message.reply_text("🔁 Сколько раз напомнить? (число, по умолчанию 1)")
@@ -315,7 +323,7 @@ async def reminder_repeats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     max_reminders = 999 if premium else 2
     current = get_reminders_count(user_id)
     if current >= max_reminders:
-        await update.message.reply_text(f"❌ Лимит активных напоминаний ({max_reminders}). Удалите старые или купите Premium (/premium).")
+        await update.message.reply_text(f"❌ Лимит напоминаний ({max_reminders}). Купите Premium.")
         return ConversationHandler.END
     text = context.user_data["reminder_text"]
     remind_at = context.user_data["remind_at"]
@@ -331,22 +339,21 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = c.fetchall()
     conn.close()
     if not rows:
-        await update.message.reply_text("📭 У вас нет активных напоминаний.")
+        await update.message.reply_text("📭 Нет активных напоминаний.")
         return
     text = "⏰ *Ваши напоминания*\n\n"
     for r in rows:
         rt = datetime.strptime(r[2], "%Y-%m-%d %H:%M:%S.%f")
-        text += f"• {r[1]} – {rt.strftime('%d.%m %H:%M')} (осталось напоминаний: {r[3]})\n"
+        text += f"• {r[1]} – {rt.strftime('%d.%m %H:%M')} (осталось: {r[3]})\n"
     await update.message.reply_text(text, parse_mode="Markdown")
 
-# -------------------- ПРИВЫЧКИ --------------------
 async def add_habit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     premium = is_premium(user_id)
     max_habits = 999 if premium else 2
     current = get_habits_count(user_id)
     if current >= max_habits:
-        await update.message.reply_text(f"❌ Лимит привычек ({max_habits}). Удалите неиспользуемые командой /del_habit (пока вручную через БД) или купите Premium.")
+        await update.message.reply_text(f"❌ Лимит привычек ({max_habits}). Купите Premium.")
         return ConversationHandler.END
     await update.message.reply_text("🏋️ Введите название привычки (например: «Зарядка», «Чтение 30 мин»)")
     return ADD_HABIT_NAME
@@ -355,38 +362,33 @@ async def add_habit_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.message.text.strip()
     user_id = update.effective_user.id
     add_habit(user_id, name)
-    await update.message.reply_text(f"✅ Привычка «{name}» добавлена! Отмечайте её командой /track_habit {name}")
+    await update.message.reply_text(f"✅ Привычка «{name}» добавлена! Отмечайте: /track_habit {name}")
     return ConversationHandler.END
 
 async def list_habits(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     habits = get_habits(user_id)
     if not habits:
-        await update.message.reply_text("📭 У вас нет привычек. Добавьте через /add_habit")
+        await update.message.reply_text("📭 Нет привычек. Добавьте /add_habit")
         return
     text = "🏆 *Ваши привычки*\n\n"
     for h in habits:
         last = h["last_tracked"] if h["last_tracked"] else "никогда"
-        text += f"• {h['name']} – серия: {h['streak']} дней (последний раз: {last})\n"
+        text += f"• {h['name']} – серия: {h['streak']} дней (посл.: {last})\n"
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def track_habit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("❌ Укажите название привычки: /track_habit Зарядка")
+        await update.message.reply_text("❌ Укажите название: /track_habit Зарядка")
         return
     habit_name = " ".join(context.args)
     user_id = update.effective_user.id
     result = track_habit(user_id, habit_name)
     await update.message.reply_text(result)
 
-# -------------------- ОТЧЁТЫ --------------------
-async def daily_report(update: Update, context: ContextTypes.DEFAULT_TYPE, is_auto=False):
-    user_id = update.effective_user.id if not is_auto else update.user_id  # костыль для автоматического отчёта
-    if is_auto:
-        # при автоматическом вызове нет update, надо получить bot из context
-        pass
+async def daily_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     premium = is_premium(user_id)
-    # Получаем задачи за сегодня (выполненные и нет)
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     today_start = datetime.combine(date.today(), datetime.min.time())
@@ -405,80 +407,47 @@ async def daily_report(update: Update, context: ContextTypes.DEFAULT_TYPE, is_au
         percent = (done / total * 100) if total else 0
         bar_len = int(percent // 10)
         bar = "█" * bar_len + "░" * (10 - bar_len)
-        text = (
-            f"📈 *Полный отчёт (Premium)*\n"
-            f"Задач: {done}/{total} ({percent:.1f}%)\n"
-            f"[{bar}] {percent:.0f}%\n"
-            f"Привычки: {tracked}/{len(habits)} отмечено\n"
-        )
+        text = f"📈 *Полный отчёт (Premium)*\nЗадач: {done}/{total} ({percent:.1f}%)\n[{bar}] {percent:.0f}%\nПривычки: {tracked}/{len(habits)}\n"
         if total > 0:
             if percent > 70:
-                text += "🔥 Оценка: Супер! Продолжайте в том же духе."
+                text += "🔥 Супер!"
             elif percent > 40:
-                text += "😐 Оценка: Неплохо, но можно лучше."
+                text += "😐 Неплохо."
             else:
-                text += "⚠️ Оценка: Низкая продуктивность. Разберитесь с прокрастинацией."
-    await (update.message.reply_text if not is_auto else context.bot.send_message)(user_id, text, parse_mode="Markdown")
+                text += "⚠️ Низкая продуктивность."
+    await update.message.reply_text(text, parse_mode="Markdown")
 
-# -------------------- ПРЕМИУМ / ПОДПИСКА --------------------
 async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if is_premium(user_id):
-        await update.message.reply_text("У вас уже активна Premium-подписка! Наслаждайтесь безлимитом.")
+        await update.message.reply_text("Premium уже активен.")
         return
-    # ТЕСТОВАЯ АКТИВАЦИЯ (в реальности замените на Telegram Stars)
     set_premium(user_id, days=30)
-    await update.message.reply_text(
-        "🎉 *Premium активирован бесплатно (тестовый режим)* на 30 дней!\n"
-        "Теперь вам доступны: безлимит задач, приоритеты, расширенный отчёт и скоро Pomodoro.\n\n"
-        "🔜 Для реального бота подключите оплату через Telegram Stars — тогда я буду брать 99 руб/мес."
-    )
+    await update.message.reply_text("🎉 Premium активирован на 30 дней (тест). Теперь безлимит и расширенная статистика.")
 
-# -------------------- ФОНОВЫЙ ПРОЦЕСС НАПОМИНАНИЙ --------------------
 async def reminder_loop(app: Application):
-    """Проверяет напоминания каждые 30 секунд"""
+    """Фоновая проверка напоминаний каждые 30 секунд"""
     while True:
-        now = datetime.now()
-        reminders = get_due_reminders(now)
-        for rem in reminders:
-            try:
-                await app.bot.send_message(rem["user_id"], f"🔔 Напоминание: {rem['text']}")
-                decrement_reminder(rem["id"])
-            except Exception as e:
-                print(f"Ошибка отправки напоминания: {e}")
-        await asyncio.sleep(30)
+        try:
+            now = datetime.now()
+            reminders = get_due_reminders(now)
+            for rem in reminders:
+                try:
+                    await app.bot.send_message(rem["user_id"], f"🔔 Напоминание: {rem['text']}")
+                    decrement_reminder(rem["id"])
+                except Exception as e:
+                    logger.error(f"Ошибка отправки напоминания {rem['id']}: {e}")
+            await asyncio.sleep(30)
+        except Exception as e:
+            logger.error(f"Ошибка в reminder_loop: {e}")
+            await asyncio.sleep(30)
 
-# Ежедневный отчёт в 22:00 по часовому поясу пользователя (упрощённо – всем в 22:00 по UTC+3)
-async def daily_report_scheduler(app: Application):
-    while True:
-        now = datetime.now()
-        target = now.replace(hour=22, minute=0, second=0, microsecond=0)
-        if now >= target:
-            target += timedelta(days=1)
-        await asyncio.sleep((target - now).total_seconds())
-        # Отправляем отчёт всем пользователям (получаем список активных)
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("SELECT user_id FROM users")
-        users = c.fetchall()
-        conn.close()
-        for (uid,) in users:
-            try:
-                # Фейковый вызов daily_report для автоотчёта
-                # Без update, используем bot напрямую
-                # Создадим временный объект контекста
-                class DummyUpdate:
-                    effective_user = None
-                await daily_report(DummyUpdate(), app, is_auto=True)
-            except Exception as e:
-                print(f"Ошибка отправки отчёта пользователю {uid}: {e}")
-
-# -------------------- MAIN --------------------
 async def main():
+    logger.info("Запуск бота...")
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Обработчики команд
+    # Регистрация обработчиков
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("tasks", show_tasks))
     app.add_handler(CommandHandler("reminders", list_reminders))
@@ -487,7 +456,6 @@ async def main():
     app.add_handler(CommandHandler("daily", daily_report))
     app.add_handler(CommandHandler("premium", premium_command))
 
-    # Conversation: добавление задач (списком)
     add_task_conv = ConversationHandler(
         entry_points=[CommandHandler("add_task", add_task_start)],
         states={ADD_TASK_WAITING: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_task_receive)]},
@@ -495,7 +463,6 @@ async def main():
     )
     app.add_handler(add_task_conv)
 
-    # Conversation: добавление напоминания
     add_reminder_conv = ConversationHandler(
         entry_points=[CommandHandler("add_reminder", add_reminder_start)],
         states={
@@ -507,7 +474,6 @@ async def main():
     )
     app.add_handler(add_reminder_conv)
 
-    # Conversation: добавление привычки
     add_habit_conv = ConversationHandler(
         entry_points=[CommandHandler("add_habit", add_habit_start)],
         states={ADD_HABIT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_habit_receive)]},
@@ -517,13 +483,18 @@ async def main():
 
     app.add_handler(CallbackQueryHandler(task_done_callback, pattern="^done_"))
 
-    # Запускаем фоновые задачи
-    loop = asyncio.get_event_loop()
-    loop.create_task(reminder_loop(app))
-    loop.create_task(daily_report_scheduler(app))
+    # Запуск фонового цикла напоминаний
+    asyncio.create_task(reminder_loop(app))
 
-    print("Бот запущен...")
+    logger.info("Бот запущен и готов к работе")
+    # Используем polling без привязки к веб-серверу
     await app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен")
+    except Exception as e:
+        logger.exception("Критическая ошибка при запуске")
+        sys.exit(1)
