@@ -19,7 +19,7 @@ from telegram.ext import (
 # ======================== КОНФИГУРАЦИЯ ========================
 BOT_TOKEN = "8604443712:AAGPC5TWB7QU_cJD-tKVAgw5zjnRMoAasQ8"   # ← ВСТАВЬТЕ СЮДА ТОКЕН, лучше через secrets
 DB_NAME = "assistant.db"
-ADMIN_ID = @nikaaaa_r   # Укажите ваш Telegram ID для получения уведомлений (опционально)
+
 
 # ======================== БАЗА ДАННЫХ ========================
 def init_db():
