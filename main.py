@@ -482,6 +482,47 @@ async def main():
     logger.info("Бот запущен и готов к работе")
     await app.run_polling()
 
+# === КОМАНДА ДЛЯ СБРОСА БАЗЫ ДАННЫХ (ДЛЯ АДМИНИСТРАТОРА) ===
+# Укажите здесь ваш числовой Telegram ID. Его можно узнать у бота @userinfobot
+ADMIN_ID = 886976653  # <-- ВСТАВЬТЕ СВОЙ ID СЮДА, например ADMIN_ID = 123456789
+
+async def reset_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Проверяем, что команду отправил именно администратор
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ У вас нет прав для выполнения этой команды.")
+        return
+
+    # Отправляем сообщение о начале сброса
+    await update.message.reply_text("🔄 Начинаю сброс базы данных...")
+
+    try:
+        # Закрываем все соединения с базой данных, если они были открыты
+        # (в текущем коде они открываются и закрываются в каждой функции,
+        # так что этот шаг технически не обязателен, но оставлен для порядка)
+        if 'db_conn' in locals() and db_conn:
+            db_conn.close()
+
+        # Удаляем старый файл базы данных
+        os.remove(DB_NAME)
+        await update.message.reply_text("✅ Старый файл базы данных удалён.")
+
+        # Создаём новую, пустую базу данных
+        init_db()
+        await update.message.reply_text("✨ Новая база данных успешно создана! Бот готов к работе.")
+
+        # Логируем событие
+        logger.info(f"База данных была сброшена администратором {update.effective_user.id}")
+
+    except Exception as e:
+        # Если что-то пошло не так, сообщаем об ошибке
+        error_message = f"❌ Произошла ошибка при сбросе БД: {e}"
+        await update.message.reply_text(error_message)
+        logger.error(error_message)
+
+# Регистрируем новую команду в основном блоке `main()`, где добавляются все другие обработчики
+# Найдите в коде строки `app.add_handler(...)` и добавьте туда эту:
+# app.add_handler(CommandHandler("reset_db", reset_database))
+
 if __name__ == "__main__":
     try:
         asyncio.run(main())
