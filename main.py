@@ -449,6 +449,7 @@ async def main():
     app.add_handler(CommandHandler("track_habit", track_habit_command))
     app.add_handler(CommandHandler("daily", daily_report))
     app.add_handler(CommandHandler("premium", premium_command))
+    app.add_handler(CommandHandler("reset_db", reset_database))
 
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("add_task", add_task_start)],
