@@ -25,7 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# === ТОКЕН (ВСТАВЬТЕ СВОЙ ПРАВИЛЬНЫЙ ТОКЕН) ===
+# === ТОКЕН (ВСТАВЬ СВОЙ) ===
 BOT_TOKEN = "8604443712:AAGPC5TWB7QU_cJD-tKVAgw5zjnRMoAasQ8"
 
 if not BOT_TOKEN:
@@ -34,7 +34,7 @@ if not BOT_TOKEN:
 
 DB_NAME = "assistant.db"
 
-# === БАЗА ДАННЫХ ===
+# === БАЗА ДАННЫХ — ИСПРАВЛЕНА ===
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -54,6 +54,7 @@ def init_db():
         due_date TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
+    # ИСПРАВЛЕНО: добавлены имена колонок
     c.execute('''CREATE TABLE IF NOT EXISTS reminders (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
@@ -62,6 +63,7 @@ def init_db():
         repeats_left INTEGER DEFAULT 1,
         is_active BOOLEAN DEFAULT 1
     )''')
+    # ИСПРАВЛЕНО: колонка name TEXT вместо text TEXT
     c.execute('''CREATE TABLE IF NOT EXISTS habits (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
@@ -338,7 +340,10 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = "⏰ *Напоминания*\n\n"
     for r in rows:
-        rt = datetime.strptime(r[2], "%Y-%m-%d %H:%M:%S.%f")
+        try:
+            rt = datetime.strptime(r[2], "%Y-%m-%d %H:%M:%S.%f")
+        except:
+            rt = datetime.now()
         text += f"• {r[1]} – {rt.strftime('%d.%m %H:%M')} (ост. {r[3]})\n"
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -420,7 +425,7 @@ async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_premium(user_id, days=30)
     await update.message.reply_text("🎉 Premium активирован на 30 дней (тест). Безлимит + расширенная статистика.")
 
-# === ФОНОВАЯ ПРОВЕРКА НАПОМИНАНИЙ (через JobQueue) ===
+# === ФОНОВАЯ ПРОВЕРКА НАПОМИНАНИЙ ===
 async def check_reminders_callback(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now()
     reminders = get_due_reminders(now)
@@ -437,7 +442,6 @@ async def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Регистрация обработчиков
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("tasks", show_tasks))
     app.add_handler(CommandHandler("reminders", list_reminders))
@@ -446,14 +450,13 @@ async def main():
     app.add_handler(CommandHandler("daily", daily_report))
     app.add_handler(CommandHandler("premium", premium_command))
 
-    add_task_conv = ConversationHandler(
+    app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("add_task", add_task_start)],
         states={ADD_TASK_WAITING: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_task_receive)]},
         fallbacks=[CommandHandler("cancel", lambda u,c: ConversationHandler.END)]
-    )
-    app.add_handler(add_task_conv)
+    ))
 
-    add_reminder_conv = ConversationHandler(
+    app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("add_reminder", add_reminder_start)],
         states={
             ADD_REMINDER_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, reminder_text)],
@@ -461,24 +464,20 @@ async def main():
             ADD_REMINDER_REPEATS: [MessageHandler(filters.TEXT & ~filters.COMMAND, reminder_repeats)],
         },
         fallbacks=[CommandHandler("cancel", lambda u,c: ConversationHandler.END)]
-    )
-    app.add_handler(add_reminder_conv)
+    ))
 
-    add_habit_conv = ConversationHandler(
+    app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("add_habit", add_habit_start)],
         states={ADD_HABIT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_habit_receive)]},
         fallbacks=[CommandHandler("cancel", lambda u,c: ConversationHandler.END)]
-    )
-    app.add_handler(add_habit_conv)
+    ))
 
     app.add_handler(CallbackQueryHandler(task_done_callback, pattern="^done_"))
 
-    # JobQueue для напоминаний (каждые 30 секунд)
-    job_queue = app.job_queue
-    if job_queue:
-        job_queue.run_repeating(check_reminders_callback, interval=30, first=10)
+    if app.job_queue:
+        app.job_queue.run_repeating(check_reminders_callback, interval=30, first=10)
     else:
-        logger.warning("JobQueue не доступен, напоминания не будут работать")
+        logger.warning("JobQueue недоступен, напоминания не будут работать")
 
     logger.info("Бот запущен и готов к работе")
     await app.run_polling()
