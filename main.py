@@ -1,11 +1,12 @@
-import aiohttp
-from aiohttp import web# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import asyncio
 import sqlite3
 import sys
 import logging
 import os
 from datetime import datetime, date, timedelta
+import aiohttp
+from aiohttp import web
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -26,8 +27,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# === ТОКЕН (ВСТАВЬ СВОЙ) ===
-BOT_TOKEN = "8604443712:AAGPC5TWB7QU_cJD-tKVAgw5zjnRMoAasQ8"
+# === ТОКЕН ВАШЕГО БОТА (вставьте сюда правильный токен) ===
+BOT_TOKEN = "8604443712:AAGPC5TWB7QU_cJD-tKVAgw5zjNtRMoAasQ8"  # ЗАМЕНИТЕ НА АКТУАЛЬНЫЙ ТОКЕН
 
 if not BOT_TOKEN:
     logger.error("BOT_TOKEN не задан")
@@ -35,7 +36,7 @@ if not BOT_TOKEN:
 
 DB_NAME = "assistant.db"
 
-# === БАЗА ДАННЫХ — ИСПРАВЛЕНА ===
+# === БАЗА ДАННЫХ ===
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -55,7 +56,6 @@ def init_db():
         due_date TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
-    # ИСПРАВЛЕНО: добавлены имена колонок
     c.execute('''CREATE TABLE IF NOT EXISTS reminders (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
@@ -64,7 +64,6 @@ def init_db():
         repeats_left INTEGER DEFAULT 1,
         is_active BOOLEAN DEFAULT 1
     )''')
-    # ИСПРАВЛЕНО: колонка name TEXT вместо text TEXT
     c.execute('''CREATE TABLE IF NOT EXISTS habits (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
@@ -235,7 +234,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/add_reminder – напоминание\n/reminders – список напоминаний\n"
         "/add_habit – привычка\n/habits – список привычек\n"
         "/track_habit <название> – отметить выполнение\n"
-        "/daily – отчёт за сегодня\n/premium – тестовая активация"
+        "/daily – отчёт за сегодня\n/premium – тестовая активация\n"
+        "/reset_db – СБРОСИТЬ БАЗУ ДАННЫХ (только админ)"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -341,8 +341,13 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = "⏰ *Напоминания*\n\n"
     for r in rows:
+        # безопасное преобразование даты из БД
+        remind_str = r[2]
         try:
-            rt = datetime.strptime(r[2], "%Y-%m-%d %H:%M:%S.%f")
+            if '.' in remind_str:
+                rt = datetime.strptime(remind_str, "%Y-%m-%d %H:%M:%S.%f")
+            else:
+                rt = datetime.strptime(remind_str, "%Y-%m-%d %H:%M:%S")
         except:
             rt = datetime.now()
         text += f"• {r[1]} – {rt.strftime('%d.%m %H:%M')} (ост. {r[3]})\n"
@@ -426,6 +431,25 @@ async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_premium(user_id, days=30)
     await update.message.reply_text("🎉 Premium активирован на 30 дней (тест). Безлимит + расширенная статистика.")
 
+# === КОМАНДА ДЛЯ СБРОСА БАЗЫ ДАННЫХ (только для админа) ===
+# ВАЖНО: Укажите здесь ваш числовой Telegram ID (можно узнать у @userinfobot)
+ADMIN_ID = 886976653  # ЗАМЕНИТЕ НА СВОЙ ID
+
+async def reset_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ У вас нет прав для этой команды.")
+        return
+    await update.message.reply_text("🔄 Сброс базы данных...")
+    try:
+        if os.path.exists(DB_NAME):
+            os.remove(DB_NAME)
+        init_db()
+        await update.message.reply_text("✅ База данных успешно сброшена!")
+        logger.info(f"База данных сброшена пользователем {update.effective_user.id}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+        logger.error(f"Ошибка сброса БД: {e}")
+
 # === ФОНОВАЯ ПРОВЕРКА НАПОМИНАНИЙ ===
 async def check_reminders_callback(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now()
@@ -441,24 +465,11 @@ async def check_reminders_callback(context: ContextTypes.DEFAULT_TYPE):
 async def main():
     logger.info("Запуск бота...")
     init_db()
+
+    # Создаём приложение Telegram
     app = Application.builder().token(BOT_TOKEN).build()
-    # ===== healthcheck endpoint для Render =====
-    from aiohttp import web
-    async def health(request):
-        return web.Response(text="OK")
 
-    async def run_healthcheck():
-        app_web = web.Application()
-        app_web.router.add_get("/health", health)
-        runner = web.AppRunner(app_web)
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", 8000)
-        await site.start()
-        while True:
-            await asyncio.sleep(3600)
-
-    asyncio.create_task(run_healthcheck())
-    # ============================================
+    # === РЕГИСТРАЦИЯ ВСЕХ ОБРАБОТЧИКОВ ===
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("tasks", show_tasks))
     app.add_handler(CommandHandler("reminders", list_reminders))
@@ -468,13 +479,14 @@ async def main():
     app.add_handler(CommandHandler("premium", premium_command))
     app.add_handler(CommandHandler("reset_db", reset_database))
 
-    app.add_handler(ConversationHandler(
+    add_task_conv = ConversationHandler(
         entry_points=[CommandHandler("add_task", add_task_start)],
         states={ADD_TASK_WAITING: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_task_receive)]},
         fallbacks=[CommandHandler("cancel", lambda u,c: ConversationHandler.END)]
-    ))
+    )
+    app.add_handler(add_task_conv)
 
-    app.add_handler(ConversationHandler(
+    add_reminder_conv = ConversationHandler(
         entry_points=[CommandHandler("add_reminder", add_reminder_start)],
         states={
             ADD_REMINDER_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, reminder_text)],
@@ -482,64 +494,39 @@ async def main():
             ADD_REMINDER_REPEATS: [MessageHandler(filters.TEXT & ~filters.COMMAND, reminder_repeats)],
         },
         fallbacks=[CommandHandler("cancel", lambda u,c: ConversationHandler.END)]
-    ))
+    )
+    app.add_handler(add_reminder_conv)
 
-    app.add_handler(ConversationHandler(
+    add_habit_conv = ConversationHandler(
         entry_points=[CommandHandler("add_habit", add_habit_start)],
         states={ADD_HABIT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_habit_receive)]},
         fallbacks=[CommandHandler("cancel", lambda u,c: ConversationHandler.END)]
-    ))
+    )
+    app.add_handler(add_habit_conv)
 
     app.add_handler(CallbackQueryHandler(task_done_callback, pattern="^done_"))
 
+    # === Запуск напоминаний через JobQueue ===
     if app.job_queue:
         app.job_queue.run_repeating(check_reminders_callback, interval=30, first=10)
     else:
         logger.warning("JobQueue недоступен, напоминания не будут работать")
 
-    logger.info("Бот запущен и готов к работе")
+    # === Healthcheck сервер для Render ===
+    async def health_handler(request):
+        return web.Response(text="OK")
+
+    health_app = web.Application()
+    health_app.router.add_get("/health", health_handler)
+    runner = web.AppRunner(health_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 8000)
+    await site.start()
+    logger.info("Healthcheck сервер запущен на порту 8000")
+
+    # === Запуск бота ===
+    logger.info("Бот готов к работе")
     await app.run_polling()
-
-# === КОМАНДА ДЛЯ СБРОСА БАЗЫ ДАННЫХ (ДЛЯ АДМИНИСТРАТОРА) ===
-# Укажите здесь ваш числовой Telegram ID. Его можно узнать у бота @userinfobot
-ADMIN_ID = 886976653  # <-- ВСТАВЬТЕ СВОЙ ID СЮДА, например ADMIN_ID = 123456789
-
-async def reset_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, что команду отправил именно администратор
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ У вас нет прав для выполнения этой команды.")
-        return
-
-    # Отправляем сообщение о начале сброса
-    await update.message.reply_text("🔄 Начинаю сброс базы данных...")
-
-    try:
-        # Закрываем все соединения с базой данных, если они были открыты
-        # (в текущем коде они открываются и закрываются в каждой функции,
-        # так что этот шаг технически не обязателен, но оставлен для порядка)
-        if 'db_conn' in locals() and db_conn:
-            db_conn.close()
-
-        # Удаляем старый файл базы данных
-        os.remove(DB_NAME)
-        await update.message.reply_text("✅ Старый файл базы данных удалён.")
-
-        # Создаём новую, пустую базу данных
-        init_db()
-        await update.message.reply_text("✨ Новая база данных успешно создана! Бот готов к работе.")
-
-        # Логируем событие
-        logger.info(f"База данных была сброшена администратором {update.effective_user.id}")
-
-    except Exception as e:
-        # Если что-то пошло не так, сообщаем об ошибке
-        error_message = f"❌ Произошла ошибка при сбросе БД: {e}"
-        await update.message.reply_text(error_message)
-        logger.error(error_message)
-
-# Регистрируем новую команду в основном блоке `main()`, где добавляются все другие обработчики
-# Найдите в коде строки `app.add_handler(...)` и добавьте туда эту:
-# app.add_handler(CommandHandler("reset_db", reset_database))
 
 if __name__ == "__main__":
     try:
