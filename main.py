@@ -441,7 +441,23 @@ async def main():
     logger.info("Запуск бота...")
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
+    # ===== healthcheck endpoint для Render =====
+    from aiohttp import web
+    async def health(request):
+        return web.Response(text="OK")
 
+    async def run_healthcheck():
+        app_web = web.Application()
+        app_web.router.add_get("/health", health)
+        runner = web.AppRunner(app_web)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", 8000)
+        await site.start()
+        while True:
+            await asyncio.sleep(3600)
+
+    asyncio.create_task(run_healthcheck())
+    # ============================================
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("tasks", show_tasks))
     app.add_handler(CommandHandler("reminders", list_reminders))
